@@ -162,6 +162,7 @@ const threadState = (threadId: ThreadId) =>
 it.effect.each([
   "idle",
   "archived",
+  "missing",
   "running",
   "queued",
   "waiting",
@@ -188,6 +189,8 @@ it.effect.each([
       const originalNode = parent.nodes.find((node) => node.id === original.id)!;
       const taskId = NodeId.make(`node:orphan-followup:${childState}`);
       const itemId = TurnItemId.make(`item:orphan-followup:${childState}`);
+      const followupChildThreadId =
+        childState === "missing" ? ThreadId.make("thread:missing-child") : childThreadId;
       const now = yield* DateTime.now;
       let sequence = 0;
       const apply = (event: Omit<OrchestrationV2DomainEvent, "id">) =>
@@ -237,7 +240,14 @@ it.effect.each([
         type: "subagent.updated",
         threadId: parentThreadId,
         occurredAt: now,
-        payload: { ...original, id: taskId, status: "running", result: null, completedAt: null },
+        payload: {
+          ...original,
+          id: taskId,
+          childThreadId: followupChildThreadId,
+          status: "running",
+          result: null,
+          completedAt: null,
+        },
       });
       yield* apply({
         type: "node.updated",
@@ -256,6 +266,7 @@ it.effect.each([
           id: itemId,
           nodeId: taskId,
           subagentId: taskId,
+          childThreadId: followupChildThreadId,
           status: "running",
         },
       });
@@ -376,6 +387,7 @@ it.effect.each([
         threadId: parentThreadId,
       });
       const after = yield* orchestrator.getThreadProjection(parentThreadId);
+      assert.isEmpty((after.thread.pullRequests ?? []).filter((link) => link.watch !== undefined));
       const expected = childState === "idle" || childState === "archived" ? "cancelled" : "running";
       assert.equal(after.subagents.find((task) => task.id === taskId)?.status, expected);
       assert.equal(after.nodes.find((node) => node.id === taskId)?.status, expected);

@@ -9470,7 +9470,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         const pending = yield* Ref.get(events);
         const children = new Map<
           ThreadId,
-          ProjectionRecords<"runs" | "providerThreads" | "runtimeRequests" | "turnItems">
+          ProjectionRecords<"runs" | "providerThreads" | "runtimeRequests" | "turnItems"> | null
         >();
         const idleChildren = new Map<ThreadId, boolean>();
         let nodes: ReadonlyArray<OrchestrationV2ExecutionNode> | undefined;
@@ -9485,17 +9485,28 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             !isOrchestrationV2WorkActive(task.status)
           )
             continue;
-          const child =
-            children.get(task.childThreadId) ??
-            (yield* projectionStore.getThreadRecords(
-              task.childThreadId,
-              ["runs", "providerThreads", "runtimeRequests", "turnItems"],
-              {
-                turnItemTypes: ["command_execution", "dynamic_tool", "subagent"],
-                turnItemStatuses: ["pending", "running", "waiting"],
-              },
-            ));
-          children.set(task.childThreadId, child);
+          const childThreadId = task.childThreadId;
+          const child = children.has(childThreadId)
+            ? (children.get(childThreadId) ?? null)
+            : yield* projectionStore
+                .getThreadRecords(
+                  childThreadId,
+                  ["runs", "providerThreads", "runtimeRequests", "turnItems"],
+                  {
+                    turnItemTypes: ["command_execution", "dynamic_tool", "subagent"],
+                    turnItemStatuses: ["pending", "running", "waiting"],
+                  },
+                )
+                .pipe(
+                  Effect.catchTags({
+                    ProjectionStoreThreadNotFoundError: () => Effect.succeed(null),
+                  }),
+                  Effect.mapError(
+                    (cause) => new OrchestratorProjectionError({ threadId: childThreadId, cause }),
+                  ),
+                );
+          children.set(childThreadId, child);
+          if (child === null) continue;
           if (
             child.thread.lineage.parentThreadId !== command.threadId ||
             child.thread.lineage.relationshipToParent !== "subagent" ||
@@ -9554,8 +9565,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           }
         }
       }).pipe(
-        Effect.mapError(
-          (cause) => new OrchestratorProjectionError({ threadId: command.threadId, cause }),
+        Effect.mapError((cause) =>
+          Schema.is(OrchestratorProjectionError)(cause)
+            ? cause
+            : new OrchestratorProjectionError({ threadId: command.threadId, cause }),
         ),
       );
       const latestRun = projection.runs.findLast((run) => run.status !== "queued");
